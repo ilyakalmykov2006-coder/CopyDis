@@ -1,0 +1,13 @@
+/** Browser WebRTC mesh: WebSocket carries only SDP/ICE signaling, never audio. */
+export class VoiceMesh {
+  private stream?: MediaStream; private peers = new Map<string, RTCPeerConnection>();
+  constructor(private readonly signal: (to: string, data: RTCSessionDescriptionInit | RTCIceCandidateInit) => void, private readonly onLevel: (id: string, speaking: boolean) => void) {}
+  async start(constraints: MediaTrackConstraints) { this.stream = await navigator.mediaDevices.getUserMedia({ audio: constraints }); return this.stream; }
+  setMuted(muted: boolean) { this.stream?.getAudioTracks().forEach((track) => { track.enabled = !muted; }); }
+  async call(id: string) { const pc = this.create(id); const offer = await pc.createOffer(); await pc.setLocalDescription(offer); this.signal(id, offer); }
+  async receive(id: string, data: RTCSessionDescriptionInit | RTCIceCandidateInit) { let pc = this.peers.get(id); if (!pc) pc = this.create(id); if ("candidate" in data) { await pc.addIceCandidate(data as RTCIceCandidateInit); return; } await pc.setRemoteDescription(data as RTCSessionDescriptionInit); if (data.type === "offer") { const answer = await pc.createAnswer(); await pc.setLocalDescription(answer); this.signal(id, answer); } }
+  setPeerVolume(id: string, value: number) { const audio = document.querySelector(`audio[data-peer="${id}"]`) as HTMLAudioElement | null; if (audio) audio.volume = Math.min(1, value / 100); }
+  close() { this.stream?.getTracks().forEach((t) => t.stop()); this.peers.forEach((p) => p.close()); this.peers.clear(); }
+  private create(id: string) { const pc = new RTCPeerConnection({ iceServers: [] }); this.peers.set(id, pc); this.stream?.getTracks().forEach((track) => pc.addTrack(track, this.stream!)); pc.onicecandidate = ({ candidate }) => { if (candidate) this.signal(id, candidate.toJSON()); }; pc.ontrack = ({ streams }) => { const audio = document.createElement("audio"); audio.dataset.peer = id; audio.autoplay = true; audio.srcObject = streams[0]; document.body.append(audio); this.watchLevel(id, streams[0]); }; pc.onconnectionstatechange = () => { if (["failed", "closed"].includes(pc.connectionState)) this.peers.delete(id); }; return pc; }
+  private watchLevel(id: string, stream: MediaStream) { const context = new AudioContext(); const analyser = context.createAnalyser(); context.createMediaStreamSource(stream).connect(analyser); const data = new Uint8Array(analyser.fftSize); const tick = () => { analyser.getByteTimeDomainData(data); const active = data.some((v) => Math.abs(v - 128) > 8); this.onLevel(id, active); if (this.peers.has(id)) requestAnimationFrame(tick); else void context.close(); }; tick(); }
+}
